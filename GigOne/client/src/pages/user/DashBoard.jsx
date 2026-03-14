@@ -30,31 +30,47 @@ export default function DashBoard() {
   const [location, setLocation] = useState({ lat: null, lon: null });
   const [weatherData, setWeatherData] = useState(null);
   const chatEndRef = useRef(null);
+  const currentAudioRef = useRef(null); // Track current playing audio for cleanup
 
-  // Text-to-Speech function
-  const playVoice = (text) => {
-    if (!("speechSynthesis" in window)) return;
+  // 🔊 Pre-fetch audio blob from Edge TTS (returns blob, doesn't play yet)
+  const fetchVoice = async (text) => {
+    try {
+      return await chatApi.synthesizeSpeech(text);
+    } catch (err) {
+      console.warn("Edge TTS fetch failed:", err.message);
+      return null;
+    }
+  };
 
+  // Play audio blob (or fallback to browser TTS)
+  const playAudio = (audioBlob, text) => {
     // Stop any currently playing audio
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
     window.speechSynthesis.cancel();
 
-    const utterance = new SpeechSynthesisUtterance(text);
-
-    // Try to find a Hindi or Indian English voice
-    const voices = window.speechSynthesis.getVoices();
-    const indianVoice = voices.find(
-      (v) => v.lang.includes("hi-IN") || v.lang.includes("en-IN"),
-    );
-
-    if (indianVoice) {
-      utterance.voice = indianVoice;
+    if (audioBlob) {
+      const audioUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(audioUrl);
+      currentAudioRef.current = audio;
+      audio.onended = () => {
+        URL.revokeObjectURL(audioUrl);
+        currentAudioRef.current = null;
+      };
+      audio.play();
+    } else if ("speechSynthesis" in window) {
+      // Fallback to browser TTS
+      const utterance = new SpeechSynthesisUtterance(text);
+      const voices = window.speechSynthesis.getVoices();
+      const indianVoice = voices.find(
+        (v) => v.lang.includes("hi-IN") || v.lang.includes("en-IN"),
+      );
+      if (indianVoice) utterance.voice = indianVoice;
+      utterance.rate = 1.1;
+      window.speechSynthesis.speak(utterance);
     }
-
-    // Adjust pitch and rate for a more natural feel
-    utterance.pitch = 1.0;
-    utterance.rate = 0.95; // Slightly slower for better Hinglish pronunciation
-
-    window.speechSynthesis.speak(utterance);
   };
 
   // Initialize chat session (called manually)
@@ -63,8 +79,10 @@ export default function DashBoard() {
       setIsProcessing(true);
       const data = await chatApi.startSession();
       setConversationId(data.conversationId);
+
+      // Show text immediately, play voice in background (non-blocking)
       setMessages([{ role: "assistant", text: data.reply }]);
-      playVoice(data.reply);
+      fetchVoice(data.reply).then((blob) => playAudio(blob, data.reply));
     } catch (err) {
       console.error("Failed to start chat session", err);
     } finally {
@@ -177,6 +195,7 @@ export default function DashBoard() {
         location.lon,
       );
 
+      // Show text immediately, play voice in background (non-blocking)
       setMessages((prev) => {
         const newMsgs = prev.slice(0, -1); // remove loading bubble
         return [
@@ -185,7 +204,7 @@ export default function DashBoard() {
           { role: "assistant", text: data.reply },
         ];
       });
-      playVoice(data.reply);
+      fetchVoice(data.reply).then((blob) => playAudio(blob, data.reply));
     } catch (err) {
       console.error("Error sending voice reply:", err);
     } finally {

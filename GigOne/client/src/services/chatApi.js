@@ -3,6 +3,10 @@ import axios from "axios";
 // Using Vite's env variable or default to localhost
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
+// Edge TTS server URL (openai-edge-tts running locally)
+const TTS_URL = import.meta.env.VITE_TTS_URL || "http://localhost:5050";
+const TTS_API_KEY = import.meta.env.VITE_TTS_API_KEY || "my_free_project_key";
+
 // Helper to get token from storage or URL
 const getToken = () => {
   // Check URL first (after Google login)
@@ -66,5 +70,28 @@ export const chatApi = {
       headers: getHeaders()
     });
     return res.data;
-  }
+  },
+
+  // 🔊 Text-to-Speech via openai-edge-tts (Microsoft Neural voices)
+  synthesizeSpeech: async (text) => {
+    const response = await fetch(`${TTS_URL}/v1/audio/speech`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${TTS_API_KEY}`,
+      },
+      body: JSON.stringify({
+        input: text,
+        voice: "en-IN-NeerjaNeural",
+        response_format: "mp3",
+        speed: 1.25,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`TTS request failed: ${response.status}`);
+    }
+
+    return await response.blob();
+  },
 };
