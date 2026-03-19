@@ -189,7 +189,7 @@ const reply = async (req, res) => {
     conversation.messages.push({ role: "assistant", text: aiReply });
 
     // Transition State
-    const nextStep = getNextStep(currentStep);
+    const nextStep = getNextStep(currentStep, extractedValue);
     conversation.step = nextStep;
 
     if (nextStep === "done") {
@@ -251,7 +251,7 @@ const replyText = async (req, res) => {
     }
 
     conversation.messages.push({ role: "assistant", text: aiReply });
-    const nextStep = getNextStep(conversation.step);
+    const nextStep = getNextStep(conversation.step, extractedValue);
     conversation.step = nextStep;
 
     if (nextStep === "done") {

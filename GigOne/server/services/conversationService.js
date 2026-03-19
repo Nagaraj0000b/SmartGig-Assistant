@@ -108,7 +108,14 @@ CRITICAL RULES:
  */
 const processChatTurn = async (currentStep, userText, recentMessages = [], context = null) => {
   const stepConfig = STEP_CONFIG[currentStep];
-  if (!stepConfig) throw new Error(`Unknown conversation step: ${currentStep}`);
+  if (!stepConfig) {
+    // Conversation is already complete — return a friendly wrap-up instead of crashing
+    return {
+      sentiment: { mood: "neutral", score: 0, summary: "Check-in complete.", suggestion: "Rest well!" },
+      reply: "Aaj ka check-in ho chuka hai! Naya check-in shuru karne ke liye mic button dabao.",
+      extractedValue: null,
+    };
+  }
 
   const historyBlock = recentMessages
     .slice(-6)
@@ -140,7 +147,14 @@ ${historyBlock}
 Worker just said: "${userText}"
 
 YOUR GOAL FOR THIS REPLY: ${stepConfig.goal}
-${stepConfig.extract ? `\nYou also need to extract: "${stepConfig.extract}" from the worker's text.` : ''}
+${stepConfig.extract ? `
+CRITICAL EXTRACTION RULE for "${stepConfig.extract}":
+- ONLY extract "${stepConfig.extract}" if the worker EXPLICITLY mentioned it in their latest message.
+- NEVER guess, assume, or infer "${stepConfig.extract}" from your own previous questions or conversation history.
+- If the worker did NOT clearly provide "${stepConfig.extract}", you MUST set "extractedValue" to null.
+- When "extractedValue" is null, your reply MUST be a friendly apology like "Sorry, woh thoda miss ho gaya. Kya aap bata sakte ho [the question]?" — re-ask for the missing info naturally.
+- Do NOT move forward to the next topic until the worker answers.
+` : ''}
 
 Return ONLY a JSON object:
 {
@@ -175,13 +189,20 @@ Return ONLY a JSON object:
 
 /**
  * Determines the logical next step in the workflow state machine.
+ * Stays on the current step if required extraction data is missing.
  * 
  * @function getNextStep
  * @param {string} currentStep - Current workflow state.
+ * @param {any} extractedValue - The value extracted in the current turn.
  * @returns {string} Next workflow state.
  */
-const getNextStep = (currentStep) => {
-  return STEP_CONFIG[currentStep]?.nextStep || "done";
+const getNextStep = (currentStep, extractedValue = null) => {
+  const stepConfig = STEP_CONFIG[currentStep];
+  if (stepConfig?.extract && (extractedValue === null || extractedValue === undefined)) {
+    // Stay on the current step until the required data is provided
+    return currentStep;
+  }
+  return stepConfig?.nextStep || "done";
 };
 
 module.exports = { generateGreeting, processChatTurn, getNextStep, STEP_CONFIG };
