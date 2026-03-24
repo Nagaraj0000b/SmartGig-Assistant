@@ -1,34 +1,26 @@
-const router  = require("express").Router();
-const multer  = require("multer");
-const auth    = require("../middleware/auth");
-const { transcribe, getContext, startChat, reply, replyText } = require("../controllers/chatController");
+/**
+ * @fileoverview Conversational AI routes for the Gigi companion.
+ */
 
-// Multer config — saves audio to temp uploads/ folder
-const storage = multer.diskStorage({
-  destination: "uploads/",
-  filename: (req, file, cb) => {
-    const ext = file.originalname.split(".").pop();
-    cb(null, `audio-${Date.now()}.${ext}`);
-  },
-});
-const upload = multer({ storage });
+const router = require("express").Router();
+const auth = require("../middleware/auth");
+const uploadAudio = require("../middleware/uploadAudio");
+const {
+  getContext,
+  startChat,
+  reply,
+  replyText,
+  getBurnoutStatus,
+  deleteConversation,
+  getChatHistory,
+} = require("../controllers/chatController");
 
-// POST /api/chat/start
-// Start a new check-in session → returns AI greeting
+router.get("/history", auth, getChatHistory);
 router.post("/start", auth, startChat);
-
-// POST /api/chat/reply
-// Send voice reply → transcribe → sentiment → AI follow-up → advance flow
-router.post("/reply", auth, upload.single("audio"), reply);
-
-// POST /api/chat/reply-text
-// Send text reply (for testing without mic) → sentiment → AI follow-up
+router.post("/reply", auth, uploadAudio, reply);
 router.post("/reply-text", auth, replyText);
-
-// POST /api/chat/transcribe (legacy)
-router.post("/transcribe", auth, upload.single("audio"), transcribe);
-
-// GET /api/chat/context
 router.get("/context", auth, getContext);
+router.get("/burnout", auth, getBurnoutStatus);
+router.delete("/:id", auth, deleteConversation);
 
 module.exports = router;

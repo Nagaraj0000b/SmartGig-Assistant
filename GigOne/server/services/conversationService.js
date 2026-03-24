@@ -1,65 +1,75 @@
-// Step-aware conversational AI engine
-// Guides the worker through a structured check-in flow:
-// greeting → mood → platform → earnings → hours → summary
+/**
+ * @fileoverview Step-aware conversational AI engine.
+ */
 
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const AppError = require("../utils/appError");
+const { requireEnv } = require("../utils/env");
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-3.1-flash-lite-preview" });
+let model;
 
-// ─── Step definitions ──────────────────────────────────────────
-// Each step has a prompt goal and what data to extract from the reply
+const getModel = () => {
+  if (!model) {
+    const genAI = new GoogleGenerativeAI(requireEnv("GEMINI_API_KEY"));
+    model = genAI.getGenerativeModel({ model: "gemini-3.1-flash-lite-preview" });
+  }
+
+  return model;
+};
 
 const STEP_CONFIG = {
   greeting: {
     goal: "Greet the worker warmly. Ask how their day was. Be casual and friendly.",
     nextStep: "mood",
-    extract: null, // nothing to extract yet
+    extract: null,
   },
   mood: {
-    goal: "The worker just told you about their day. Acknowledge their feelings based on the sentiment. Then ask which platform they worked on today (Uber, Swiggy, Rapido, etc).",
+    goal: "Acknowledge their feelings based on sentiment. Ask which platform they worked on (Uber, Swiggy, Rapido, etc).",
     nextStep: "platform",
     extract: null,
   },
   platform: {
-    goal: "The worker mentioned their platform. Acknowledge it, then ask how much they earned today.",
+    goal: "Acknowledge the platform. Ask for today's total earnings.",
     nextStep: "earnings",
-    extract: "platform", // extract platform name
+    extract: "platform",
   },
   earnings: {
-    goal: "The worker told you their earnings. React appropriately (celebrate if good, encourage if low). Then ask how many hours they worked.",
+    goal: "React to earnings. Ask for the total hours worked.",
     nextStep: "hours",
-    extract: "earnings", // extract earnings amount
+    extract: "earnings",
   },
   hours: {
-    goal: "The worker told you their hours. Now wrap up — give a brief summary of their day and one smart suggestion for tomorrow (consider weather/traffic if available).",
-    nextStep: "summary",
-    extract: "hours", // extract hours worked
-  },
-  summary: {
-    goal: "The check-in is complete. Give a motivational closing message. Keep it short and sweet.",
+    goal: "Wrap up. React to hours. Provide a short summary, a smart suggestion based on weather/traffic, and a motivational closing. Check-in is now complete.",
     nextStep: "done",
-    extract: null,
+    extract: "hours",
   },
 };
 
-/**
- * Generate a greeting message to start a new check-in session.
- * Called when user first opens the chat or starts a new session.
- *
- * @param {object} [context] - Optional { weather, traffic } data
- * @returns {Promise<string>} - Opening greeting text
- */
-const generateGreeting = async (userName = "buddy", context = null) => {
+const generateGreeting = async (userName = "buddy", context = null, language = null) => {
   let contextBlock = "";
   if (context?.weather?.current) {
-    const w = context.weather.current;
-    contextBlock = `\nCurrent weather: ${w.condition}, ${w.temp}°C.`;
+    const weather = context.weather.current;
+    contextBlock += `\nCurrent weather: ${weather.condition}, ${weather.temp}C.`;
   }
+
+  if (context?.burnoutStatus) {
+    if (context.burnoutStatus.isBurnoutAlert) {
+      contextBlock +=
+        "\nURGENT HEALTH ALERT: The worker has worked 3 consecutive stressful days and is facing severe burnout. You MUST politely but firmly suggest they take a rest day today before you ask about their day.";
+    } else if (context.burnoutStatus.isStressWarning) {
+      contextBlock +=
+        "\nHEALTH NOTE: The worker is experiencing high stress this week. Warmly remind them to take it easy today and not overwork.";
+    }
+  }
+
+  const languageRule =
+    language && language !== "English"
+      ? `LANGUAGE RULE: You MUST reply ONLY in ${language}. Do NOT use English or Hinglish. Respond entirely in ${language}.`
+      : "Personality: warm, supportive, casual Hinglish (Hindi + English mix).";
 
   const prompt = `
 You are an AI companion for Indian gig economy workers.
-Personality: warm, supportive, casual Hinglish (Hindi + English mix).
+${languageRule}
 ${contextBlock}
 
 The worker's name is "${userName}".
@@ -68,56 +78,62 @@ Use their name naturally. Ask how their day was. Be warm and natural.
 
 CRITICAL RULES:
 - ALWAYS use secular, universally inclusive greetings (e.g., "Hello", "Hi", "Hey", "Namaste", "Adab").
-- NEVER use religion-specific greetings (like "Ram Ram", "Jai Shri Ram", "Assalamu Alaikum", etc.) to guarantee the app is welcoming to all Indians.
+- NEVER use religion-specific greetings.
 - Do NOT use any emojis.
-- Return ONLY the greeting text, no quotes, no labels.
+- Return ONLY the greeting text.
   `.trim();
 
-  const result = await model.generateContent(prompt);
-  return result.response.text().trim();
+  try {
+    const result = await getModel().generateContent(prompt);
+    return result.response.text().trim();
+  } catch (error) {
+    throw new AppError("Unable to start chat right now", 502, {
+      code: "AI_SERVICE_ERROR",
+      expose: false,
+      cause: error,
+    });
+  }
 };
 
-/**
- * Process the entire chat turn in ONE SINGLE Gemini API call.
- * This analyzes sentiment, generates the reply, and extracts data simultaneously 
- * via structured JSON output to completely eliminate multi-call latency.
- */
-const processChatTurn = async (currentStep, userText, recentMessages = [], context = null) => {
+const processChatTurn = async (
+  currentStep,
+  userText,
+  recentMessages = [],
+  context = null,
+  language = null
+) => {
   const stepConfig = STEP_CONFIG[currentStep];
   if (!stepConfig) {
-    throw new Error(`Unknown conversation step: ${currentStep}`);
+    return {
+      reply: "Aaj ka check-in ho chuka hai! Naya check-in shuru karne ke liye mic button dabao.",
+      extractedValue: null,
+    };
   }
 
-  // Build conversation history
   const historyBlock = recentMessages
     .slice(-6)
-    .map((m) => `${m.role === "user" ? "Worker" : "Assistant"}: ${m.text}`)
+    .map((message) => `${message.role === "user" ? "Worker" : "Assistant"}: ${message.text}`)
     .join("\n");
 
-  // Build context block
   let contextBlock = "";
-  if (context) {
-    if (context.weather?.current) {
-      const w = context.weather.current;
-      contextBlock += `\nWeather: ${w.condition}, ${w.temp}°C, feels like ${w.feels_like}°C.`;
-    }
-    if (context.weather?.tomorrow) {
-      const t = context.weather.tomorrow;
-      contextBlock += `\nTomorrow's weather: ${t.condition}, ${t.temp}°C.`;
-    }
-    if (context.traffic) {
-      const t = context.traffic;
-      contextBlock += `\nTraffic: ${t.traffic_level} (${t.congestion_percent}% congestion).`;
-    }
+  if (context?.weather?.current) {
+    const weather = context.weather.current;
+    contextBlock += `\nWeather: ${weather.condition}, ${weather.temp}C.`;
   }
+
+  if (context?.traffic) {
+    const traffic = context.traffic;
+    contextBlock += `\nTraffic: ${traffic.traffic_level} (${traffic.congestion_percent}% congestion).`;
+  }
+
+  const languageRule =
+    language && language !== "English"
+      ? `LANGUAGE RULE: You MUST reply ONLY in ${language}. Do NOT use English or Hinglish. All text in the "reply" field MUST be in ${language}. Short sentences. No emojis.`
+      : "Personality: Warm, supportive, casual Hinglish. Short sentences (1-2 max). No emojis.";
 
   const prompt = `
 You are an AI companion for Indian gig economy workers.
-Personality:
-- Warm, supportive, like a trusted friend
-- Casual Hinglish (Hindi + English mix) — short, natural sentences
-- Keep replies SHORT — 1-2 sentences max
-- Do NOT use any emojis under any circumstances
+${languageRule}
 
 Context:
 ${contextBlock}
@@ -128,52 +144,72 @@ ${historyBlock}
 Worker just said: "${userText}"
 
 YOUR GOAL FOR THIS REPLY: ${stepConfig.goal}
-${stepConfig.extract ? `\nYou also need to extract: "${stepConfig.extract}" from the worker's text.` : ''}
+${stepConfig.extract ? `
+CRITICAL EXTRACTION RULE for "${stepConfig.extract}":
+- ONLY extract "${stepConfig.extract}" if the worker EXPLICITLY mentioned it in their latest message.
+- NEVER guess, assume, or infer "${stepConfig.extract}" from your own previous questions or conversation history.
+- If the worker did NOT clearly provide "${stepConfig.extract}", you MUST set "extractedValue" to null.
+- When "extractedValue" is null, your reply MUST be a friendly apology like "Sorry, woh thoda miss ho gaya. Kya aap bata sakte ho [the question]?" and re-ask for the missing info naturally.
+- Do NOT move forward to the next topic until the worker answers.
+- ALWAYS extract numbers as pure digits (e.g., return 2 instead of "two" or "Two hours"). DO NOT include units like "hours" or "rupees".
+` : ""}
 
-Analyze the text and return ONLY a valid JSON object matching this exact schema:
+Return ONLY a JSON object:
 {
-  "sentiment": {
-    "mood": "happy|neutral|stressed|frustrated|tired|excited",
-    "score": <number from -1.0 to 1.0>,
-    "summary": "1 short sentence about their emotion",
-    "suggestion": "1 short helpful tip"
-  },
-  "reply": "Your Hinglish response to the worker",
-  "extractedValue": <extracted ${stepConfig.extract || 'null'} as a number or string, or null if not found/needed>
+  "reply": "Hinglish response",
+  "extractedValue": <extracted ${stepConfig.extract || "null"} or null>
 }
-Do NOT include any markdown code blocks, backticks, or other text.
   `.trim();
 
-  console.time("⚡ Unified Gemini Call");
-  const result = await model.generateContent(prompt);
-  let raw = result.response.text().trim();
-  console.timeEnd("⚡ Unified Gemini Call");
-
-  // Strip possible markdown
-  if (raw.startsWith('\`\`\`json')) {
-    raw = raw.replace('\`\`\`json', '').replace('\`\`\`', '').trim();
-  } else if (raw.startsWith('\`\`\`')) {
-    raw = raw.replace('\`\`\`', '').replace('\`\`\`', '').trim();
+  let raw;
+  try {
+    const result = await getModel().generateContent(prompt);
+    raw = result.response.text().trim();
+  } catch (error) {
+    throw new AppError("AI conversation service is temporarily unavailable", 502, {
+      code: "AI_SERVICE_ERROR",
+      expose: false,
+      cause: error,
+    });
   }
+
+  raw = raw.replace(/^```json\s*/i, "").replace(/\s*```$/, "").trim();
 
   try {
     const parsed = JSON.parse(raw);
+
+    if (currentStep === "platform" && parsed.extractedValue) {
+      const normalized =
+        String(parsed.extractedValue).charAt(0).toUpperCase() +
+        String(parsed.extractedValue).slice(1).toLowerCase();
+      const validPlatforms = ["Uber", "Swiggy", "Rapido", "Other"];
+
+      if (!validPlatforms.includes(normalized)) {
+        parsed.extractedValue = null;
+        parsed.reply =
+          "Main theek se samajh nahi paaya ki aapne aaj kis platform par kaam kiya. Kya aap dobara bata sakte hain? (Uber, Swiggy, Rapido ya Other?)";
+      } else {
+        parsed.extractedValue = normalized;
+      }
+    }
+
     return parsed;
-  } catch (err) {
-    console.error("JSON parse error from Gemini:", err, raw);
+  } catch (error) {
+    console.warn("AI chat turn returned invalid JSON. Falling back to retry prompt.");
     return {
-      sentiment: { mood: "neutral", score: 0 },
-      reply: "Got it.",
-      extractedValue: null
+      reply: "Sorry, woh thoda miss ho gaya. Kya aap ek baar dobara bata sakte ho?",
+      extractedValue: null,
     };
   }
 };
 
-/**
- * Get the next step after the current one.
- */
-const getNextStep = (currentStep) => {
-  return STEP_CONFIG[currentStep]?.nextStep || "done";
+const getNextStep = (currentStep, extractedValue = null) => {
+  const stepConfig = STEP_CONFIG[currentStep];
+  if (stepConfig?.extract && (extractedValue === null || extractedValue === undefined)) {
+    return currentStep;
+  }
+
+  return stepConfig?.nextStep || "done";
 };
 
 module.exports = { generateGreeting, processChatTurn, getNextStep, STEP_CONFIG };

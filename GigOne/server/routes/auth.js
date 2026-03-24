@@ -1,39 +1,63 @@
-const router = require("express").Router(); // mini express app for this route group
-const { register, login } = require("../controllers/authController"); // import controllers
+/**
+ * @fileoverview Authentication routes for local and Google OAuth 2.0.
+ */
 
-// POST /api/auth/register  →  create a new user
-router.post("/register", register);
-
-// POST /api/auth/login  →  login and get token
-router.post("/login", login);
-
-// ==========================================
-// GOOGLE OAUTH ROUTES
-// ==========================================
+const router = require("express").Router();
 const passport = require("passport");
 const jwt = require("jsonwebtoken");
+const { register, login } = require("../controllers/authController");
+const AppError = require("../utils/appError");
+const { requireEnv } = require("../utils/env");
+const { googleOAuthEnabled } = require("../config/passport");
 
-// 1. Send the user to Google to sign in
-router.get("/google", passport.authenticate("google", { scope: ["profile", "email"] }));
+const ensureGoogleOAuthEnabled = (req, res, next) => {
+  if (!googleOAuthEnabled) {
+    next(new AppError("Google login is not configured", 503, { code: "OAUTH_UNAVAILABLE" }));
+    return;
+  }
 
-// 2. Google redirects back here with the user's profile
+  next();
+};
+
+router.post("/register", register);
+router.post("/login", login);
+
+router.get(
+  "/google",
+  ensureGoogleOAuthEnabled,
+  passport.authenticate("google", { scope: ["profile", "email"] })
+);
+
 router.get(
   "/google/callback",
-  passport.authenticate("google", { session: false, failureRedirect: "/login" }),
-  (req, res) => {
-    // If successful, passport attaches the user to req.user
-    const user = req.user;
+  ensureGoogleOAuthEnabled,
+  passport.authenticate("google", {
+    session: false,
+    failureRedirect: `${process.env.CLIENT_URL || "http://localhost:5173"}/login?error=oauth_failed`,
+  }),
+  (req, res, next) => {
+    try {
+      const user = req.user;
 
-    // Generate our JWT token for them 
-    const token = jwt.sign(
-      { userId: user._id, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
+      if (!user?._id) {
+        throw new AppError("Google authentication failed", 401, { code: "AUTH_INVALID" });
+      }
 
-    // Redirect them back to our frontend React app with the token in the URL URL
-    // so the React app can grab it and save it to LocalStorage
-    res.redirect(`http://localhost:5173/user/dashboard?token=${token}&user=${encodeURIComponent(JSON.stringify({ id: user._id, name: user.name, role: user.role }))}`);
+      const token = jwt.sign(
+        { userId: user._id, role: user.role },
+        requireEnv("JWT_SECRET"),
+        { expiresIn: "7d" }
+      );
+
+      const redirectUrl = process.env.CLIENT_URL || "http://localhost:5173";
+      res.redirect(
+        `${redirectUrl}/user/dashboard?token=${token}&user=${encodeURIComponent(
+          JSON.stringify({ id: user._id, name: user.name, role: user.role })
+        )}`
+      );
+    } catch (error) {
+      next(error);
+    }
   }
 );
 

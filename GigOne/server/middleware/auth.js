@@ -1,25 +1,35 @@
+/**
+ * @fileoverview Authentication middleware for JWT validation and request authorization.
+ */
+
 const jwt = require("jsonwebtoken");
-
-
-
-// It asks for token .  
-// If token is valid it tells routes who it is and allow routing
-// Else blocked 
+const AppError = require("../utils/appError");
+const { requireEnv } = require("../utils/env");
 
 module.exports = (req, res, next) => {
-  const header = req.headers.authorization;
+  const authHeader = req.headers.authorization;
 
-  if (!header || !header.startsWith("Bearer ")) {
-    return res.status(401).json({ message: "No token, unauthorized" });
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    next(new AppError("Authentication token is required", 401, { code: "AUTH_REQUIRED" }));
+    return;
   }
 
-  const token = header.split(" ")[1];
+  const token = authHeader.split(" ")[1];
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded; // { userId, role }
+    const decoded = jwt.verify(token, requireEnv("JWT_SECRET"));
+
+    if (!decoded?.userId) {
+      throw new AppError("Invalid authentication token", 401, { code: "AUTH_INVALID" });
+    }
+
+    req.user = decoded;
     next();
-  } catch {
-    res.status(401).json({ message: "Invalid token" });
+  } catch (error) {
+    next(
+      error instanceof AppError
+        ? error
+        : new AppError("Invalid or expired token", 401, { code: "AUTH_INVALID" })
+    );
   }
 };

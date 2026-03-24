@@ -1,69 +1,70 @@
-const bcrypt = require("bcryptjs");
-const jwt    = require("jsonwebtoken");
-const User   = require("../models/User");
+/**
+ * @fileoverview Authentication controller managing user registration and login workflows.
+ */
 
-// Helper: generate JWT
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const User = require("../models/User");
+const asyncHandler = require("../utils/asyncHandler");
+const AppError = require("../utils/appError");
+const { requireEnv } = require("../utils/env");
+const {
+  ensureEmail,
+  ensureMinLengthString,
+  ensureNonEmptyString,
+} = require("../utils/validation");
+
 const generateToken = (user) => {
-  // Contains the user's ID and role inside it
-  // Expires in 7 days
-  // Is signed with your secret key so it can't be faked
   return jwt.sign(
-    { userId: user._id, role: user.role }, // payload inside the token
-    process.env.JWT_SECRET,                // secret key from .env
+    { userId: user._id, role: user.role },
+    requireEnv("JWT_SECRET"),
     { expiresIn: "7d" }
   );
 };
 
-// POST /api/auth/register
-const register = async (req, res) => {
-  // 1. Check if email already exists → if yes, block it
-  // 2. Hash the password (bcrypt turns "1234" into a scrambled string)
-  // 3. Save the new user to MongoDB
-  // 4. Return a token + basic user info
+const register = asyncHandler(async (req, res) => {
+  const name = ensureNonEmptyString(req.body.name, "name");
+  const email = ensureEmail(req.body.email);
+  const password = ensureMinLengthString(req.body.password, "password", 6);
 
-  const { name, email, password } = req.body; // get data from request
-  try {
-    const exists = await User.findOne({ email }); // check DB for existing email
-    if (exists) return res.status(400).json({ message: "Email already registered" });
-
-    const passwordHash = await bcrypt.hash(password, 10); // 10 = salt rounds (security level)
-    const user = await User.create({ name, email, passwordHash }); // save to DB
-
-    res.status(201).json({
-      token: generateToken(user), // send token back to frontend
-      user: { id: user._id, name: user.name, role: user.role },
-    });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
+  const existingUser = await User.findOne({ email });
+  if (existingUser) {
+    throw new AppError("Email already registered", 409, { code: "EMAIL_EXISTS" });
   }
-};
 
-// POST /api/auth/login
-const login = async (req, res) => {
-  // 1. Find user by email → if not found, block it
-  // 2. Compare entered password with stored hash
-  // 3. If it matches → return a fresh token + user info
+  const passwordHash = await bcrypt.hash(password, 10);
+  const user = await User.create({ name, email, passwordHash });
 
-  const { email, password } = req.body;
-  try {
-    const user = await User.findOne({ email }); // look up user in DB
-    if (!user) return res.status(400).json({ message: "User not found" });
+  res.status(201).json({
+    token: generateToken(user),
+    user: { id: user._id, name: user.name, role: user.role },
+  });
+});
 
-    // Handle legacy users that don't have passwordHash
-    if (!user.passwordHash) {
-      return res.status(400).json({ message: "Legacy account structure detected. Please sign up again." });
-    }
+const login = asyncHandler(async (req, res) => {
+  const email = ensureEmail(req.body.email);
+  const password = ensureNonEmptyString(req.body.password, "password");
 
-    const valid = await bcrypt.compare(password, user.passwordHash); // compare plain vs hashed
-    if (!valid) return res.status(400).json({ message: "Wrong password" });
-
-    res.json({
-      token: generateToken(user), // send fresh token
-      user: { id: user._id, name: user.name, role: user.role },
-    });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
+  const user = await User.findOne({ email });
+  if (!user) {
+    throw new AppError("Invalid email or password", 401, { code: "AUTH_INVALID" });
   }
-};
 
-module.exports = { register, login }; // expose both functions to routes
+  if (!user.passwordHash || user.passwordHash === "google_oauth_no_password") {
+    throw new AppError("This account uses Google login. Please continue with Google.", 400, {
+      code: "OAUTH_ACCOUNT",
+    });
+  }
+
+  const validPassword = await bcrypt.compare(password, user.passwordHash);
+  if (!validPassword) {
+    throw new AppError("Invalid email or password", 401, { code: "AUTH_INVALID" });
+  }
+
+  res.json({
+    token: generateToken(user),
+    user: { id: user._id, name: user.name, role: user.role },
+  });
+});
+
+module.exports = { register, login };
