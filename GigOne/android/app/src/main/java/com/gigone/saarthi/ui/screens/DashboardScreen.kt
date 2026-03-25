@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -60,6 +61,7 @@ fun DashboardScreen(
     val isProcessing by vm.isProcessing.collectAsStateWithLifecycle()
     val isRecording by vm.isRecording.collectAsStateWithLifecycle()
     val selectedLanguage by vm.selectedLanguage.collectAsStateWithLifecycle()
+    val currentLocationName by vm.currentLocationName.collectAsStateWithLifecycle()
 
     DisposableEffect(Unit) {
         onDispose { vm.resetSession() }
@@ -77,12 +79,22 @@ fun DashboardScreen(
         }
     }
 
-    // ─── Runtime permission launcher ─────────────────────────────────────────
+    // ─── Runtime permission launchers ─────────────────────────────────────────
     val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) vm.handleMicPressIn()
-        // If denied, do nothing — user will see the button disabled
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val micGranted = permissions[Manifest.permission.RECORD_AUDIO] ?: false
+        if (micGranted) vm.handleMicPressIn()
+    }
+
+    val locationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val locGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                         permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        if (locGranted) {
+            vm.refreshLocation()
+        }
     }
 
     // ─── Root layout ─────────────────────────────────────────────────────────
@@ -108,33 +120,70 @@ fun DashboardScreen(
             ) {
                 // Left: Language Pill
                 Surface(
-                    shape = RoundedCornerShape(16.dp),
+                    shape = RoundedCornerShape(12.dp),
                     color = Color(0x0DFFFFFF),
                     modifier = Modifier.clickable { showLangPicker = true }
                 ) {
+                    val shortLang = selectedLanguage.take(3).uppercase()
                     Text(
-                        "🌐 $selectedLanguage ▼",
+                        "🌐 $shortLang ▼",
                         color = AppColors.Accent,
-                        fontSize = 14.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                     )
                 }
 
-                // Right: Profile Icon (Navigates to Swiggy-style Profile screen)
-                IconButton(
-                    onClick = onProfileClick,
-                    modifier = Modifier
-                        .size(42.dp)
-                        .clip(CircleShape)
-                        .background(Color(0x1A6C63FF))
-                ) {
-                    Icon(
-                        Icons.Default.Person,
-                        contentDescription = "Profile",
-                        tint = AppColors.Primary,
-                        modifier = Modifier.size(24.dp)
-                    )
+                // Right side: Location + Profile
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Location Pill
+                    Row(
+                        modifier = Modifier
+                            .clickable {
+                                if (vm.hasLocationPermission()) {
+                                    vm.refreshLocation()
+                                } else {
+                                    locationLauncher.launch(
+                                        arrayOf(
+                                            Manifest.permission.ACCESS_FINE_LOCATION,
+                                            Manifest.permission.ACCESS_COARSE_LOCATION
+                                        )
+                                    )
+                                }
+                            }
+                            .padding(end = 10.dp), // Reverted strictly to start/end padding to fix profile layout
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.LocationOn,
+                            contentDescription = "Location",
+                            tint = AppColors.Accent,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            currentLocationName,
+                            color = AppColors.TextSecondary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+
+                    // Right: Profile Icon (Navigates to Swiggy-style Profile screen)
+                    IconButton(
+                        onClick = onProfileClick,
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .background(Color(0x1A6C63FF))
+                    ) {
+                        Icon(
+                            Icons.Default.Person,
+                            contentDescription = "Profile",
+                            tint = AppColors.Primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
                 }
             }
 
@@ -286,7 +335,13 @@ fun DashboardScreen(
                                         if (vm.hasAudioPermission()) {
                                             vm.handleMicPressIn()
                                         } else {
-                                            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                            permissionLauncher.launch(
+                                                arrayOf(
+                                                    Manifest.permission.RECORD_AUDIO,
+                                                    Manifest.permission.ACCESS_FINE_LOCATION,
+                                                    Manifest.permission.ACCESS_COARSE_LOCATION
+                                                )
+                                            )
                                         }
                                         // Wait for release
                                         tryAwaitRelease()

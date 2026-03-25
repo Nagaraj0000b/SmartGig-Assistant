@@ -25,6 +25,30 @@ const {
   parseCoordinates,
 } = require("../utils/validation");
 
+/**
+ * Calculates the Unix timestamp (seconds) for the "Next Shift" target.
+ * Logic:
+ * - After 16:00 (4 PM) -> Tomorrow 09:00 AM
+ * - Before 12:00 (Noon) -> Today 18:00 (6 PM)
+ * - Mid-day: +12 hours
+ */
+const calculateNextShiftTarget = () => {
+  const now = new Date();
+  const target = new Date(now);
+  const hour = now.getHours();
+
+  if (hour >= 16) {
+    target.setDate(now.getDate() + 1);
+    target.setHours(9, 0, 0, 0);
+  } else if (hour <= 12) {
+    target.setHours(18, 0, 0, 0);
+  } else {
+    target.setHours(hour + 12);
+  }
+
+  return Math.floor(target.getTime() / 1000);
+};
+
 const TEXT_TO_NUM = {
   half: 0.5,
   one: 1,
@@ -218,9 +242,11 @@ const runChatTurn = async ({ conversation, originalText, translatedText, languag
 
 const getContext = asyncHandler(async (req, res) => {
   const coordinates = parseCoordinates(req.query.lat, req.query.lon, { required: true });
+  const targetTime = calculateNextShiftTarget();
+
   const [weather, traffic] = await Promise.all([
-    getWeatherContext(coordinates.lat, coordinates.lon),
-    getTraffic(coordinates.lat, coordinates.lon),
+    getWeatherContext(coordinates.lat, coordinates.lon, targetTime),
+    getTraffic(coordinates.lat, coordinates.lon, targetTime),
   ]);
 
   res.json({ weather, traffic });
@@ -234,11 +260,27 @@ const startChat = asyncHandler(async (req, res) => {
   const language = typeof req.body.language === "string" ? req.body.language.trim() : null;
   const platforms = Array.isArray(req.body.platforms) ? req.body.platforms : [];
   const vehicles = Array.isArray(req.body.vehicles) ? req.body.vehicles : [];
+  const coordinates = parseCoordinates(req.body.lat, req.body.lon);
+
+  const targetTime = calculateNextShiftTarget();
+  const contextPromise = coordinates
+    ? Promise.all([
+        getWeatherContext(coordinates.lat, coordinates.lon, targetTime),
+        getTraffic(coordinates.lat, coordinates.lon, targetTime),
+      ]).catch((err) => {
+        console.warn("Context fetch failed in startChat:", err.message);
+        return [null, null];
+      })
+    : Promise.resolve([null, null]);
+
+  const [weather, traffic] = await contextPromise;
 
   const context = {
     ...(lastDone?.burnoutStatus ? { burnoutStatus: lastDone.burnoutStatus } : {}),
     platforms,
-    vehicles
+    vehicles,
+    weather,
+    traffic
   };
 
   const greeting = await generateGreeting(user?.name || "buddy", context, language || null);
@@ -273,17 +315,21 @@ const reply = asyncHandler(async (req, res) => {
     const vehicles = typeof req.body.vehicles === "string" ? req.body.vehicles.split(",").filter(Boolean) : [];
 
     const conversation = await findConversationForUser(conversationId, req.user.userId);
+    const targetTime = calculateNextShiftTarget();
 
-    const weatherPromise = coordinates
-      ? getWeatherContext(coordinates.lat, coordinates.lon).catch((error) => {
-          console.warn("Weather context fetch failed during chat:", error.message);
-          return null;
+    const contextPromise = coordinates
+      ? Promise.all([
+          getWeatherContext(coordinates.lat, coordinates.lon, targetTime),
+          getTraffic(coordinates.lat, coordinates.lon, targetTime),
+        ]).catch((error) => {
+          console.warn("Context fetch failed during chat reply:", error.message);
+          return [null, null];
         })
-      : Promise.resolve(null);
+      : Promise.resolve([null, null]);
 
-    const [transcriptionResult, weather] = await Promise.all([
-      transcribeAudio(filePath),
-      weatherPromise,
+    const [transcriptionResult, [weather, traffic]] = await Promise.all([
+      transcribeAudio(filePath, language),
+      contextPromise,
     ]);
 
     const transcriptionOriginal = transcriptionResult?.originalText || "";
@@ -309,6 +355,7 @@ const reply = asyncHandler(async (req, res) => {
       language,
       context: { 
         ...(weather ? { weather } : {}),
+        ...(traffic ? { traffic } : {}),
         platforms,
         vehicles
       },

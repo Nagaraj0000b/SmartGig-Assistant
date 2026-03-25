@@ -3,6 +3,8 @@ package com.gigone.saarthi.ui.screens
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
+import android.location.Geocoder
+import android.location.Location
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -12,10 +14,16 @@ import com.gigone.saarthi.data.ChatApi
 import com.gigone.saarthi.util.TtsPlayer
 import com.gigone.saarthi.util.TokenManager
 import com.gigone.saarthi.util.VoiceRecorder
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.asRequestBody
@@ -44,6 +52,9 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     }
     private val voiceRecorder = VoiceRecorder(ctx)
     private val ttsPlayer = TtsPlayer(ctx)
+    private val fusedLocationClient: FusedLocationProviderClient by lazy {
+        LocationServices.getFusedLocationProviderClient(ctx)
+    }
 
     // ─── State ──────────────────────────────────────────────────────────────
     private val _messages = MutableStateFlow<List<ChatMessage>>(
@@ -56,6 +67,9 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
+
+    private val _currentLocationName = MutableStateFlow("Locating...")
+    val currentLocationName: StateFlow<String> = _currentLocationName.asStateFlow()
 
     private val _selectedLanguage = MutableStateFlow(
         ctx.getSharedPreferences("saarthi_prefs", 0).getString("language", "English") ?: "English"
@@ -79,13 +93,16 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 _isProcessing.value = true
                 
+                val location = getCurrentLocation()
                 val platforms = TokenManager.getPlatforms(ctx).toList()
                 val vehicles = TokenManager.getVehicles(ctx).toList()
                 
                 val body = com.gigone.saarthi.data.StartSessionRequest(
                     language = _selectedLanguage.value,
                     platforms = platforms,
-                    vehicles = vehicles
+                    vehicles = vehicles,
+                    lat = location?.latitude,
+                    lon = location?.longitude
                 )
                 
                 val data = chatApi.startSession(body)
@@ -142,6 +159,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 _isProcessing.value = true
 
+                val location = getCurrentLocation()
                 // Show "Processing" indicator (mirrors web client)
                 _messages.value = _messages.value + ChatMessage("user", "🎙️ Processing voice...")
 
@@ -158,12 +176,17 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 val platformsBody = platforms.toRequestBody("text/plain".toMediaType())
                 val vehiclesBody = vehicles.toRequestBody("text/plain".toMediaType())
 
+                val latBody = location?.latitude?.toString()?.toRequestBody("text/plain".toMediaType())
+                val lonBody = location?.longitude?.toString()?.toRequestBody("text/plain".toMediaType())
+
                 val data: AudioReplyResponse = chatApi.sendAudioReply(
                     audioPart, 
                     convIdBody, 
                     langBody,
                     platformsBody,
-                    vehiclesBody
+                    vehiclesBody,
+                    latBody,
+                    lonBody
                 )
 
                 // Replace the "Processing" bubble with real transcription + reply
@@ -198,6 +221,72 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     fun hasAudioPermission(): Boolean =
         ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
+
+    /** Check whether location permissions are granted. */
+    fun hasLocationPermission(): Boolean =
+        ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+        ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+    fun refreshLocation() {
+        viewModelScope.launch {
+            _currentLocationName.value = "Locating..."
+            getCurrentLocation()
+        }
+    }
+
+    /** Fetches the current location using FusedLocationProviderClient with fresh request & fallback. */
+    private suspend fun getCurrentLocation(): Location? {
+        if (!hasLocationPermission()) {
+            _currentLocationName.value = "Loc off"
+            return null
+        }
+        return try {
+            // 1. ALWAYS try to get a FRESH, high-accuracy location first (with timeout)
+            var location = withTimeoutOrNull(5000L) {
+                fusedLocationClient.getCurrentLocation(
+                    Priority.PRIORITY_HIGH_ACCURACY,
+                    CancellationTokenSource().token
+                ).await()
+            }
+
+            // 2. If GPS is weak/times out, fall back to the last known cached location
+            if (location == null) {
+                location = try {
+                    fusedLocationClient.lastLocation.await()
+                } catch (e: Exception) { null }
+            }
+            
+            if (location != null) {
+                updateLocationName(location)
+            } else {
+                _currentLocationName.value = "Unknown"
+            }
+            location
+        } catch (e: Exception) {
+            android.util.Log.e("DashboardViewModel", "Failed to get location", e)
+            _currentLocationName.value = "Loc err"
+            null
+        }
+    }
+
+    /** Updates the human-readable location name using Geocoder. */
+    private fun updateLocationName(location: Location) {
+        viewModelScope.launch {
+            try {
+                val geocoder = Geocoder(ctx, java.util.Locale.getDefault())
+                // getFromLocation is blocking, but we are in a coroutine
+                val addresses = geocoder.getFromLocation(location.latitude, location.longitude, 1)
+                if (!addresses.isNullOrEmpty()) {
+                    val address = addresses[0]
+                    // Prefer highly specific street-level details for maximum accuracy
+                    val name = address.thoroughfare ?: address.subLocality ?: address.featureName ?: address.locality ?: address.adminArea ?: "Unknown"
+                    _currentLocationName.value = name
+                }
+            } catch (e: Exception) {
+                _currentLocationName.value = "Location found"
+            }
+        }
+    }
 
     fun resetSession() {
         conversationId = null

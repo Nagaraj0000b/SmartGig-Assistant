@@ -24,23 +24,23 @@ const getTtsClient = () => {
 };
 
 /**
- * Maps our internal language names to Google Cloud Neural/Standard voice names.
- * Priority: Neural2 > Wavenet > Standard
+ * Maps our internal language names to Google Cloud Standard voice names.
+ * Standard models are more cost-effective.
  */
 const getVoiceConfig = (languageName) => {
   const languageMap = {
-    English: { languageCode: "en-IN", name: "en-IN-Neural2-A" }, // Female Neural
-    Hindi: { languageCode: "hi-IN", name: "hi-IN-Neural2-D" },   // Female Neural
-    Tamil: { languageCode: "ta-IN", name: "ta-IN-Wavenet-A" },   // Female Wavenet
-    Telugu: { languageCode: "te-IN", name: "te-IN-Standard-A" }, // Female Standard
-    Kannada: { languageCode: "kn-IN", name: "kn-IN-Wavenet-A" }, // Female Wavenet
-    Malayalam: { languageCode: "ml-IN", name: "ml-IN-Wavenet-A" }, // Female Wavenet
-    Marathi: { languageCode: "mr-IN", name: "mr-IN-Wavenet-A" },   // Female Wavenet
-    Bengali: { languageCode: "bn-IN", name: "bn-IN-Wavenet-A" },   // Female Wavenet
-    Gujarati: { languageCode: "gu-IN", name: "gu-IN-Wavenet-A" },  // Female Wavenet
+    English: { languageCode: "en-IN", name: "en-IN-Standard-A" },
+    Hindi: { languageCode: "hi-IN", name: "hi-IN-Standard-A" },
+    Tamil: { languageCode: "ta-IN", name: "ta-IN-Standard-A" },
+    Telugu: { languageCode: "te-IN", name: "te-IN-Standard-A" },
+    Kannada: { languageCode: "kn-IN", name: "kn-IN-Standard-A" },
+    Malayalam: { languageCode: "ml-IN", name: "ml-IN-Standard-A" },
+    Marathi: { languageCode: "mr-IN", name: "mr-IN-Standard-A" },
+    Bengali: { languageCode: "bn-IN", name: "bn-IN-Standard-A" },
+    Gujarati: { languageCode: "gu-IN", name: "gu-IN-Standard-A" },
   };
 
-  return languageMap[languageName] || { languageCode: "en-IN", name: "en-IN-Neural2-A" };
+  return languageMap[languageName] || { languageCode: "en-IN", name: "en-IN-Standard-A" };
 };
 
 /**
@@ -59,7 +59,10 @@ const synthesizeSpeech = async (text, language = "English") => {
   const request = {
     input: { text },
     voice: voiceConfig,
-    audioConfig: { audioEncoding: "MP3" },
+    audioConfig: { 
+      audioEncoding: "MP3",
+      speakingRate: 1.15 // Increased talking speed to 1.15x
+    },
   };
 
   try {

@@ -33,7 +33,9 @@ interface ChatApi {
         @Part("conversationId") conversationId: RequestBody,
         @Part("language") language: RequestBody? = null,
         @Part("platforms") platforms: RequestBody? = null,
-        @Part("vehicles") vehicles: RequestBody? = null
+        @Part("vehicles") vehicles: RequestBody? = null,
+        @Part("lat") lat: RequestBody? = null,
+        @Part("lon") lon: RequestBody? = null
     ): AudioReplyResponse
 
     /**

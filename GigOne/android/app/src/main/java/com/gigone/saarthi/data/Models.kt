@@ -10,7 +10,9 @@ data class UserData(val id: String, val name: String, val role: String)
 data class StartSessionRequest(
     val language: String,
     val platforms: List<String>,
-    val vehicles: List<String>
+    val vehicles: List<String>,
+    val lat: Double? = null,
+    val lon: Double? = null
 )
 
 /** Response from POST /api/chat/start */

@@ -1,17 +1,43 @@
 /**
- * @fileoverview Step-aware conversational AI engine.
+ * @fileoverview Step-aware conversational AI engine using GCP Vertex AI.
  */
 
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { VertexAI } = require("@google-cloud/vertexai");
+const path = require("path");
+const fs = require("fs");
 const AppError = require("../utils/appError");
-const { requireEnv } = require("../utils/env");
 
 let model;
 
 const getModel = () => {
   if (!model) {
-    const genAI = new GoogleGenerativeAI(requireEnv("GEMINI_API_KEY"));
-    model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    const keyFilename = path.join(__dirname, "..", "credential.json");
+    if (!fs.existsSync(keyFilename)) {
+      throw new AppError("Google Cloud credential.json not found in server root.", 500, {
+        code: "CONFIG_ERROR",
+      });
+    }
+
+    try {
+      const credentials = JSON.parse(fs.readFileSync(keyFilename, "utf8"));
+      const projectId = credentials.project_id;
+      const location = "us-central1"; // Use your preferred GCP region
+
+      const vertexAI = new VertexAI({
+        project: projectId,
+        location: location,
+        keyFilename: keyFilename,
+      });
+
+      model = vertexAI.getGenerativeModel({
+        model: "gemini-2.5-flash-lite",
+      });
+    } catch (error) {
+      throw new AppError("Failed to initialize Vertex AI client", 500, {
+        code: "AI_INIT_ERROR",
+        cause: error,
+      });
+    }
   }
 
   return model;
@@ -39,7 +65,7 @@ const STEP_CONFIG = {
     extract: "earnings",
   },
   hours: {
-    goal: "Wrap up. React to hours. Provide a short summary, a smart suggestion based on weather/traffic, and a motivational closing. Check-in is now complete.",
+    goal: "Wrap up. React to hours. Provide a short summary, and a specific prediction/warning for their NEXT SHIFT based on the weather and traffic context provided (e.g., predict rain or heavy traffic for tomorrow morning). End with a motivational closing.",
     nextStep: "done",
     extract: "hours",
   },
@@ -50,6 +76,16 @@ const generateGreeting = async (userName = "buddy", context = null, language = n
   if (context?.weather?.current) {
     const weather = context.weather.current;
     contextBlock += `\nCurrent weather: ${weather.condition}, ${weather.temp}C.`;
+  }
+
+  if (context?.weather?.nextShift) {
+    const next = context.weather.nextShift;
+    contextBlock += `\nNext Shift Weather (${next.time}): ${next.condition}, ${next.temp}C with ${Math.round(next.pop * 100)}% rain chance.`;
+  }
+
+  if (context?.traffic) {
+    const traffic = context.traffic;
+    contextBlock += `\nNext Shift Traffic: ${traffic.traffic_level} congestion predicted.`;
   }
 
   if (context?.platforms && context.platforms.length > 0) {
@@ -92,8 +128,11 @@ CRITICAL RULES:
   `.trim();
 
   try {
-    const result = await getModel().generateContent(prompt);
-    return result.response.text().trim();
+    const result = await getModel().generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    });
+    const response = await result.response;
+    return response.candidates[0].content.parts[0].text.trim();
   } catch (error) {
     throw new AppError("Unable to start chat right now", 502, {
       code: "AI_SERVICE_ERROR",
@@ -130,6 +169,16 @@ const processChatTurn = async (
   if (context?.weather?.current) {
     const weather = context.weather.current;
     contextBlock += `\nWeather: ${weather.condition}, ${weather.temp}C.`;
+  }
+
+  if (context?.weather?.nextShift) {
+    const next = context.weather.nextShift;
+    contextBlock += `\nNext Shift Weather (${next.time}): ${next.condition}, ${next.temp}C with ${Math.round(next.pop * 100)}% rain chance.`;
+  }
+
+  if (context?.traffic) {
+    const traffic = context.traffic;
+    contextBlock += `\nNext Shift Traffic: ${traffic.traffic_level} congestion predicted.`;
   }
 
   if (context?.platforms && context.platforms.length > 0) {
@@ -186,8 +235,11 @@ Return ONLY a JSON object:
 
   let raw;
   try {
-    const result = await getModel().generateContent(prompt);
-    raw = result.response.text().trim();
+    const result = await getModel().generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    });
+    const response = await result.response;
+    raw = response.candidates[0].content.parts[0].text.trim();
   } catch (error) {
     throw new AppError("AI conversation service is temporarily unavailable", 502, {
       code: "AI_SERVICE_ERROR",
